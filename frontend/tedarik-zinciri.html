@@ -1,0 +1,987 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tedarik Zinciri Haritası</title>
+<!--
+  Eczacıbaşı Topluluğu · tedarik zinciri haritası (KONSEPT) — tek dosya, yalnız ön yüz.
+
+  Yığın: MapLibre GL JS (eğik 2.5D dünya altlığı) + deck.gl (sevkiyat ikonları, izler,
+         rotalar, tesisler) + Natural Earth kara poligonu (world-atlas, TopoJSON).
+  Çalıştırma: herhangi bir statik sunucu (ör. `python -m http.server`) ile aç.
+
+  BACKEND AÇIK UÇTUR: her alt şirketin ajanı için AJANLAR[].url boş (null) bırakıldı.
+  URL'ler boşken ekran DEMO verisiyle çalışır ve bunu üstte "DEMO" rozetiyle söyler.
+  Bir ajanın url'si verildiği anda o ajan canlı yoklanır. Yanıt biçimi aşağıda
+  "AJAN SÖZLEŞMESİ" bölümünde.
+
+  Tesis konumları ve sevkiyatlar TEMSİLİDİR (il düzeyinde, gerçek kayıt değildir).
+  Gerçek veri ajanlardan gelir.
+
+  İnternetsiz kurulum: aşağıdaki 4 script/link adresini ve AYAR.karaUrl'yi yerel
+  kopyalara çevir (npm i maplibre-gl@5.24.0 deck.gl@9.3.5 topojson-client@3.1.0
+  world-atlas@2.0.2 → node_modules/.../dist dosyaları).
+-->
+<link rel="stylesheet" href="vendor/maplibre-gl.css">
+<script src="vendor/maplibre-gl.js"></script>
+<script src="vendor/deck.gl.min.js"></script>
+<script src="vendor/topojson-client.min.js"></script>
+<style>
+  :root {
+    --zemin: #06111d; --panel: rgba(8, 20, 33, 0.93); --cizgi: #1c3954;
+    --yazi: #dce8f5; --soluk: #8ba3bc; --vurgu: #4fb3e8;
+    --yesil: #22c55e; --sari: #f59e0b; --kirmizi: #ef4444; --gri: #94a3b8;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--zemin); color: var(--yazi);
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  #harita { position: absolute; inset: 0; }
+  .kutu { position: absolute; background: var(--panel); border: 1px solid var(--cizgi);
+    border-radius: 10px; backdrop-filter: blur(6px); }
+  button, input { font: inherit; color: inherit; }
+  .dugme { padding: 4px 9px; border-radius: 6px; border: 1px solid var(--cizgi); background: #0d2236; cursor: pointer; }
+  .dugme:hover { border-color: var(--vurgu); }
+  .dugme.acik { border-color: var(--vurgu); color: var(--vurgu); }
+
+  /* üst bilgi */
+  #ust { top: 12px; left: 12px; padding: 10px 12px; width: min(440px, calc(100vw - 24px)); }
+  #ust h1 { margin: 0; font-size: 15px; font-weight: 650; }
+  #ust .alt-baslik { color: var(--soluk); font-size: 11.5px; margin: 1px 0 8px; }
+  #rozet { display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 10.5px; font-weight: 650;
+    margin-left: 6px; vertical-align: 2px; }
+  #rozet.demo { background: rgba(245,158,11,.14); color: var(--sari); border: 1px solid rgba(245,158,11,.4); }
+  #rozet.canli { background: rgba(79,179,232,.14); color: var(--vurgu); border: 1px solid rgba(79,179,232,.4); }
+  #kpi { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+  #kpi div { background: #0a1b2c; border: 1px solid var(--cizgi); border-radius: 7px; padding: 5px 6px; }
+  #kpi b { display: block; font-size: 17px; font-variant-numeric: tabular-nums; }
+  #kpi span { font-size: 10.5px; color: var(--soluk); }
+  #ajanlar { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+  .ajan { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 2px 7px;
+    border-radius: 99px; border: 1px solid var(--cizgi); background: #0a1b2c; }
+  .ajan i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  #uyarilar div { margin-top: 6px; font-size: 11.5px; padding: 4px 7px; border-radius: 6px; }
+  #uyarilar .hata { background: rgba(239,68,68,.12); color: #ff8a8a; }
+  #uyarilar .uyari { background: rgba(245,158,11,.12); color: var(--sari); }
+  .satir { display: flex; gap: 6px; margin-top: 8px; align-items: center; flex-wrap: wrap; }
+  #ara { flex: 1; min-width: 140px; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--cizgi); background: #0a1a2a; }
+  #ara-sonuc { font-size: 11px; color: var(--soluk); min-height: 0; margin-top: 3px; }
+
+  /* lejant / süzgeç */
+  #lejant { left: 12px; bottom: 28px; padding: 9px 11px; font-size: 12px; width: 250px; max-height: 46vh; overflow: auto; }
+  #lejant h3 { margin: 0 0 4px; font-size: 11px; font-weight: 600; color: var(--soluk); text-transform: uppercase; letter-spacing: .5px; }
+  #lejant .grup + .grup { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--cizgi); }
+  #lejant label { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 1px 0; }
+  #lejant .nokta { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+  #lejant .say { margin-left: auto; color: var(--soluk); font-variant-numeric: tabular-nums; }
+  #lejant img { width: 16px; height: 16px; }
+  .yatay { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+  .yatay span { display: inline-flex; align-items: center; gap: 4px; color: var(--soluk); }
+
+  /* sağ sütun */
+  #sag { top: 12px; right: 12px; bottom: 28px; width: 330px; display: flex; flex-direction: column; gap: 8px;
+    position: absolute; pointer-events: none; }
+  #sag > .kutu { position: static; pointer-events: auto; }
+  #detay { padding: 12px; flex: none; max-height: 60%; overflow: auto; }
+  #detay[hidden] { display: none; }
+  #detay h2 { margin: 0 0 2px; font-size: 15px; }
+  #detay .alt { color: var(--soluk); font-size: 12px; margin-bottom: 8px; }
+  #detay dl { display: grid; grid-template-columns: 108px 1fr; gap: 3px 8px; margin: 0; }
+  #detay dt { color: var(--soluk); }
+  #detay dd { margin: 0; font-variant-numeric: tabular-nums; word-break: break-word; }
+  #detay .dugmeler { display: flex; gap: 6px; margin-top: 10px; }
+  #detay .dugmeler button { flex: 1; }
+  #liste { padding: 10px 0 6px; flex: 1 1 auto; min-height: 120px; overflow: auto; }
+  #liste h3 { margin: 0 12px 6px; font-size: 12px; font-weight: 600; display: flex; justify-content: space-between; }
+  #liste h3 span { color: var(--soluk); font-weight: 400; }
+  .kalem { display: grid; grid-template-columns: 8px 1fr auto; gap: 2px 8px; padding: 6px 12px; cursor: pointer; border-top: 1px solid rgba(28,57,84,.6); }
+  .kalem:hover { background: rgba(79,179,232,.07); }
+  .kalem.secili { background: rgba(79,179,232,.12); }
+  .kalem i { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; }
+  .kalem .ust { font-weight: 600; font-size: 12px; }
+  .kalem .gec { font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .kalem .aciklama { grid-column: 2 / 4; color: var(--soluk); font-size: 11.5px; }
+  .bos { padding: 8px 12px; color: var(--soluk); font-size: 12px; }
+
+  .renk-zamaninda { color: var(--yesil); } .renk-gecikmeli { color: var(--sari); }
+  .renk-kritik { color: var(--kirmizi); } .renk-bilinmiyor { color: var(--gri); } .renk-teslim { color: var(--soluk); }
+
+  #ipucu { position: absolute; pointer-events: none; z-index: 5; padding: 6px 8px; font-size: 12px;
+    background: var(--panel); border: 1px solid var(--cizgi); border-radius: 6px; white-space: nowrap; display: none; }
+  #ipucu .s { color: var(--soluk); }
+  .maplibregl-ctrl-attrib { background: rgba(6,17,29,.7) !important; color: var(--soluk); }
+  .maplibregl-ctrl-attrib a { color: var(--soluk); }
+  .maplibregl-ctrl-bottom-right { right: 350px; }
+  @media (max-width: 900px) {
+    #lejant { display: none; }
+    #sag { top: auto; left: 12px; width: auto; height: auto; max-height: 45vh; }
+    #liste { display: none; }
+    .maplibregl-ctrl-bottom-right { right: 0; }
+    #ust .alt-baslik { display: none; }
+    #ust h1 { margin-bottom: 6px; }
+    #kpi { gap: 4px; } #kpi div { padding: 4px; } #kpi b { font-size: 14px; } #kpi span { font-size: 9.5px; }
+    .ajan { font-size: 10px; padding: 1px 6px; }
+    #sag { max-height: 40vh; } #detay { max-height: 40vh; }
+  }
+</style>
+</head>
+<body>
+<div id="harita"></div>
+
+<div id="ust" class="kutu">
+  <h1>Tedarik Zinciri Haritası <span id="rozet"></span></h1>
+  <div class="alt-baslik">Eczacıbaşı Topluluğu · hammadde alış · satış · grup içi transfer · gecikmeler</div>
+  <div id="kpi"></div>
+  <div id="ajanlar"></div>
+  <div id="uyarilar"></div>
+  <div class="satir">
+    <input id="ara" type="search" placeholder="Sevkiyat no, malzeme veya tesis ara + Enter" autocomplete="off">
+    <button class="dugme" id="git-dunya" type="button">Dünya</button>
+    <button class="dugme" id="git-tr" type="button">Türkiye</button>
+  </div>
+  <div id="ara-sonuc"></div>
+</div>
+
+<div id="lejant" class="kutu"></div>
+
+<div id="sag">
+  <div id="detay" class="kutu" hidden>
+    <h2 id="d-baslik"></h2>
+    <div class="alt" id="d-alt"></div>
+    <dl id="d-liste"></dl>
+    <div class="dugmeler">
+      <button class="dugme" id="d-takip" type="button">Takip et</button>
+      <button class="dugme" id="d-kapat" type="button">Kapat</button>
+    </div>
+  </div>
+  <div id="liste" class="kutu"></div>
+</div>
+
+<div id="ipucu"></div>
+
+<script>
+'use strict';
+
+// ════════════════════════════════════════════════════════════════════════════
+// AYARLAR
+// ════════════════════════════════════════════════════════════════════════════
+const AYAR = {
+  dunya: { center: [28, 30], zoom: window.innerWidth < 900 ? 1.1 : 1.9, pitch: 40, bearing: 0 },
+  turkiye: { center: [29.4, 39.3], zoom: 5.9, pitch: 50, bearing: -8 },
+  karaUrl: 'vendor/land-50m.json',   // yerel kopya (world-atlas@2.0.2); daha ince kıyı: land-10m.json (~3 MB)
+
+  yoklamaMs: 15000,       // canlı ajan yoklama aralığı
+  ajanZamanAsimiMs: 8000, // ajan bu sürede yanıt vermezse "yanıt yok"
+  bayatSn: 30 * 60,       // sevkiyatın son konumu bundan eskiyse soluk çizilir, yaşı yazılır
+  izSn: 12 * 3600,        // sevkiyatın arkasında bırakılan iz
+  izAdimSn: 120,          // iz noktası seyreltme
+  toleransSaat: 1,        // bu kadar gecikme "zamanında" sayılır
+  kritikSaat: 24,         // bunun üstü "kritik"
+  etiketZoom: 6.3,        // bu zoom'un üstünde sevkiyat etiketleri yazılır
+  tesisEtiketZoom: 6.8,   // tesis adları (genel merkez 4, dış taraf 3 üstünde)
+  demoHiz: 300,           // demo zamanı kaç kat hızlı akar
+};
+
+// Topluluk şirketleri. Renkler yalnız ayırt etmek içindir, marka rengi değildir.
+const FIRMALAR = {
+  holding:    { ad: 'Eczacıbaşı Holding',       renk: [226, 232, 240] },
+  vitra_karo: { ad: 'VitrA Karo',               renk: [56, 140, 255] },
+  yapi:       { ad: 'Eczacıbaşı Yapı Ürünleri', renk: [167, 139, 250] },
+  ilac:       { ad: 'Eczacıbaşı İlaç',          renk: [244, 114, 182] },
+  esan:       { ad: 'ESAN',                     renk: [214, 167, 122] },
+  enerji:     { ad: 'Eczacıbaşı Enerji',        renk: [45, 212, 191] },
+  dis:        { ad: 'Dış taraf (tedarikçi / müşteri / liman)', renk: [148, 163, 184] },
+};
+
+// ── BACKEND AÇIK UÇ ────────────────────────────────────────────────────────
+// Her şirketin backend'i kendi ajanını açar. url: null → o ajan DEMO verisiyle çalışır.
+// Herhangi birine url verildiğinde sayfa CANLI moda geçer; url'si olmayan ajan
+// "yapılandırılmadı" görünür (demo veriyle doldurulmaz).
+// Not: tarayıcı ajanlara doğrudan gidecekse CORS açık olmalı; tercihen tek bir
+// backend toplayıcı (BFF) her ajanı arkada çağırıp aynı sözleşmeyle sunar.
+const AJANLAR = [
+  { id: 'vitra-karo', firma: 'vitra_karo', ad: 'VitrA Karo ajanı',               url: null },
+  { id: 'yapi',       firma: 'yapi',       ad: 'Yapı Ürünleri ajanı',            url: null },
+  { id: 'ilac',       firma: 'ilac',       ad: 'İlaç ajanı',                     url: null },
+  { id: 'esan',       firma: 'esan',       ad: 'ESAN ajanı',                     url: null },
+  { id: 'enerji',     firma: 'enerji',     ad: 'Enerji ajanı',                   url: null },
+];
+
+// Ajanlardan bağımsız, ön yüzde sabit noktalar (genel merkez, ortak limanlar)
+const SABIT_TESISLER = [
+  { id: 'hq', firma: 'holding', tur: 'merkez', ad: 'Eczacıbaşı Holding Genel Merkez', p: [29.01, 41.08] },
+  { id: 'gemlik', firma: 'dis', tur: 'liman', ad: 'Gemlik Limanı', p: [29.12, 40.43] },
+  { id: 'ambarli', firma: 'dis', tur: 'liman', ad: 'Ambarlı Limanı', p: [28.69, 40.97] },
+  { id: 'ist-havalimani', firma: 'dis', tur: 'havalimani', ad: 'İstanbul Havalimanı', p: [28.75, 41.26] },
+];
+
+const YONLER = { alis: 'Alış', satis: 'Satış', transfer: 'Grup içi transfer' };
+const MODLAR = { deniz: 'Deniz', kara: 'Kara', hava: 'Hava', demiryolu: 'Demiryolu' };
+const DURUMLAR = { yolda: 'Yolda', bekliyor: 'Bekliyor', teslim: 'Teslim edildi' };
+const TESIS_TURLERI = { merkez: 'Genel merkez', fabrika: 'Fabrika', maden: 'Maden / saha', depo: 'Depo',
+  liman: 'Liman / terminal', havalimani: 'Havalimanı', santral: 'Santral', tedarikci: 'Tedarikçi', musteri: 'Müşteri / bayi' };
+const KOVALAR = {   // gecikme sınıfı → renk + ad
+  zamaninda:  { ad: 'Zamanında',        renk: [34, 197, 94] },
+  gecikmeli:  { ad: 'Gecikmeli',        renk: [245, 158, 11] },
+  kritik:     { ad: 'Kritik gecikme',   renk: [239, 68, 68] },
+  bilinmiyor: { ad: 'ETA bilinmiyor',   renk: [148, 163, 184] },
+  teslim:     { ad: 'Teslim edildi',    renk: [100, 116, 139] },
+};
+
+// ════════════════════════════════════════════════════════════════════════════
+// AJAN SÖZLEŞMESİ — her ajan GET ile şunu döndürür (alanların tamamı JSON):
+// {
+//   "generated_at": "2026-11-25T10:00:00Z",
+//   "facilities": [                                  // bu şirketin referans verdiği noktalar
+//     { "id": "vk-bozuyuk", "name": "VitrA Karo Bozüyük", "kind": "fabrika",
+//       "lon": 30.07, "lat": 39.93, "external": false }        // external: tedarikçi/müşteri
+//   ],
+//   "shipments": [                                   // AKTİF sevkiyatların TAMAMI
+//     { "id": "VK-1041", "direction": "alis" | "satis" | "transfer",
+//       "material": "Porselen karo", "quantity": 22, "unit": "konteyner",
+//       "mode": "deniz" | "kara" | "hava" | "demiryolu",
+//       "from": "gemlik" | { "name": "...", "lon": 0, "lat": 0 },
+//       "to":   "m-hamburg" | { "name": "...", "lon": 0, "lat": 0 },
+//       "lon": 12.1, "lat": 37.9,                    // son bilinen konum (zorunlu)
+//       "heading": 290,                              // yoksa son iki konumdan; o da yoksa ◇
+//       "status": "yolda" | "bekliyor" | "teslim",
+//       "departed_at": "...", "eta_planned": "...", "eta": "...",   // ISO, epoch ms ya da sn
+//       "delay_reason": "Liman bekleme",
+//       "route": [[lon, lat], ...],                  // isteğe bağlı: seçilince çizilir
+//       "ts": "..." }                                // konumun zamanı
+//   ]
+// }
+// Kurallar (ön yüz bunları uygular):
+//  • Şirket kimliği YANITTAN değil, yanıtı veren ajandan gelir.
+//  • Yanıt o ajanın aktif sevkiyatlarının tam listesidir: listede olmayan kapanmış sayılır.
+//  • Ajan yanıt vermezse son başarılı veri silinmez; yaşıyla birlikte soluk gösterilir.
+//  • Konumu geçersiz kayıt çizilmez ve sayısı ekranda yazılır (sessizce düşmez).
+//  • eta yoksa gecikme "bilinmiyor"dur; planlanan varış geçmiş ve hâlâ yoldaysa "en az +X".
+// ════════════════════════════════════════════════════════════════════════════
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const DEMO = !AJANLAR.some((a) => a.url);
+const T0 = Date.now();
+const simdi = () => (DEMO ? T0 + (Date.now() - T0) * AYAR.demoHiz : Date.now());   // veri zamanı (ms)
+const gor = (ms) => (ms - T0) / 1000;   // TripsLayer: float32 hassasiyeti için T0'a göre saniye
+const SAAT = 3600 * 1000;
+
+// ── yardımcılar ────────────────────────────────────────────────────────────
+const YARICAP = 6371008.8, rad = (d) => (d * Math.PI) / 180, der = (r) => (r * 180) / Math.PI;
+function mesafeKm(a, b) {
+  const f1 = rad(a[1]), f2 = rad(b[1]), df = f2 - f1, dl = rad(b[0] - a[0]);
+  const h = Math.sin(df / 2) ** 2 + Math.cos(f1) * Math.cos(f2) * Math.sin(dl / 2) ** 2;
+  return (2 * YARICAP * Math.asin(Math.sqrt(h))) / 1000;
+}
+const kerteriz = (a, b) => (der(Math.atan2((b[0] - a[0]) * Math.cos(rad((a[1] + b[1]) / 2)), b[1] - a[1])) + 360) % 360;
+function buyukDaire(a, b, n = 40) {      // hava rotası
+  const [l1, f1, l2, f2] = [rad(a[0]), rad(a[1]), rad(b[0]), rad(b[1])];
+  const d = 2 * Math.asin(Math.sqrt(Math.sin((f2 - f1) / 2) ** 2 + Math.cos(f1) * Math.cos(f2) * Math.sin((l2 - l1) / 2) ** 2));
+  const o = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n, A = Math.sin((1 - t) * d) / Math.sin(d), B = Math.sin(t * d) / Math.sin(d);
+    const x = A * Math.cos(f1) * Math.cos(l1) + B * Math.cos(f2) * Math.cos(l2);
+    const y = A * Math.cos(f1) * Math.sin(l1) + B * Math.cos(f2) * Math.sin(l2);
+    const z = A * Math.sin(f1) + B * Math.sin(f2);
+    o.push([der(Math.atan2(y, x)), der(Math.atan2(z, Math.sqrt(x * x + y * y)))]);
+  }
+  return o;
+}
+const sayi = (v) => { const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v; return typeof n === 'number' && Number.isFinite(n) ? n : null; };
+function zaman(v) {   // ISO / epoch ms / epoch sn → ms
+  if (v == null || v === '') return null;
+  let t = typeof v === 'string' && !/^\d+(\.\d+)?$/.test(v) ? Date.parse(v) : sayi(v);
+  t = sayi(t); if (t != null && t < 1e11) t *= 1000;
+  return t;
+}
+function sureMetni(ms) {
+  const dk = Math.round(Math.abs(ms) / 60000);
+  if (dk < 60) return `${dk} dk`;
+  const sa = Math.floor(dk / 60), g = Math.floor(sa / 24);
+  return g ? `${g} g ${sa % 24} sa` : `${sa} sa ${dk % 60} dk`;
+}
+const yasMetni = (sn) => (sn == null || !Number.isFinite(sn) ? 'bilinmiyor' : sn < 60 ? `${Math.max(0, Math.round(sn))} sn önce` : `${sureMetni(sn * 1000)} önce`);
+const tarihMetni = (ms) => (ms == null ? '—' : new Date(ms).toLocaleString('tr-TR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }));
+const rgb = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+
+// ════════════════════════════════════════════════════════════════════════════
+// İKONLAR — çalışma anında canvas atlasına çizilir (dış dosya yok)
+// ════════════════════════════════════════════════════════════════════════════
+const H = 64;
+const SEVK_SEKILLER = ['deniz', 'kara', 'hava', 'demiryolu', 'yonsuz'];
+function sevkYolu(x, s) {          // hepsi yukarı (kuzey) bakar
+  x.beginPath();
+  if (s === 'deniz') {
+    x.moveTo(32, 4); x.quadraticCurveTo(45, 15, 44, 28); x.lineTo(44, 55); x.quadraticCurveTo(44, 60, 39, 60);
+    x.lineTo(25, 60); x.quadraticCurveTo(20, 60, 20, 55); x.lineTo(20, 28); x.quadraticCurveTo(19, 15, 32, 4);
+  } else if (s === 'kara') {      // tır: kabin + dorse
+    x.roundRect(23, 5, 18, 14, 4); x.roundRect(20, 22, 24, 38, 3);
+  } else if (s === 'hava') {
+    x.moveTo(32, 3); x.quadraticCurveTo(36, 6, 36, 16); x.lineTo(36, 24); x.lineTo(60, 36); x.lineTo(60, 41); x.lineTo(36, 35);
+    x.lineTo(35, 51); x.lineTo(44, 57); x.lineTo(44, 61); x.lineTo(32, 58); x.lineTo(20, 61); x.lineTo(20, 57); x.lineTo(29, 51);
+    x.lineTo(28, 35); x.lineTo(4, 41); x.lineTo(4, 36); x.lineTo(28, 24); x.lineTo(28, 16); x.quadraticCurveTo(28, 6, 32, 3);
+  } else if (s === 'demiryolu') {
+    x.roundRect(23, 4, 18, 26, 4); x.roundRect(23, 34, 18, 26, 3);
+  } else {
+    x.moveTo(32, 12); x.lineTo(50, 32); x.lineTo(32, 52); x.lineTo(14, 32);
+  }
+  x.closePath();
+}
+function sevkAtlasi() {
+  const kovalar = Object.keys(KOVALAR), c = document.createElement('canvas');
+  c.width = H * SEVK_SEKILLER.length; c.height = H * kovalar.length;
+  const x = c.getContext('2d'), harita = {};
+  kovalar.forEach((k, i) => SEVK_SEKILLER.forEach((s, j) => {
+    x.save(); x.translate(j * H, i * H);
+    sevkYolu(x, s); x.lineJoin = 'round'; x.lineWidth = 6; x.strokeStyle = 'rgba(2,9,16,0.95)'; x.stroke();
+    x.fillStyle = rgb(KOVALAR[k].renk); x.fill();
+    x.fillStyle = 'rgba(2,9,16,0.5)';
+    if (s === 'deniz') x.fillRect(26, 42, 12, 9);
+    x.restore();
+    harita[`${k}:${s}`] = { x: j * H, y: i * H, width: H, height: H, anchorX: H / 2, anchorY: H / 2, mask: false };
+  }));
+  return { url: c.toDataURL(), harita, canvas: c, kovalar };
+}
+const TESIS_SEKILLER = Object.keys(TESIS_TURLERI);
+function tesisYolu(x, t) {
+  x.beginPath();
+  switch (t) {
+    case 'merkez': for (let i = 0; i < 10; i++) { const r = i % 2 ? 11 : 25, a = -Math.PI / 2 + (i * Math.PI) / 5; x.lineTo(32 + r * Math.cos(a), 33 + r * Math.sin(a)); } break;
+    case 'fabrika': x.moveTo(8, 56); x.lineTo(8, 30); x.lineTo(22, 22); x.lineTo(22, 30); x.lineTo(36, 22); x.lineTo(36, 30);
+      x.lineTo(44, 26); x.lineTo(44, 8); x.lineTo(54, 8); x.lineTo(54, 56); break;
+    case 'maden': x.moveTo(6, 54); x.lineTo(26, 16); x.lineTo(36, 32); x.lineTo(42, 24); x.lineTo(58, 54); break;
+    case 'depo': x.moveTo(8, 56); x.lineTo(8, 26); x.lineTo(32, 10); x.lineTo(56, 26); x.lineTo(56, 56); break;
+    case 'liman': case 'havalimani': x.arc(32, 32, 22, 0, Math.PI * 2); break;
+    case 'santral': x.moveTo(36, 4); x.lineTo(14, 36); x.lineTo(30, 36); x.lineTo(26, 60); x.lineTo(50, 26); x.lineTo(34, 26); break;
+    case 'tedarikci': x.moveTo(32, 6); x.lineTo(58, 32); x.lineTo(32, 58); x.lineTo(6, 32); break;
+    default: x.roundRect(10, 10, 44, 44, 8);
+  }
+  x.closePath();
+}
+function tesisAtlasi() {
+  const firmalar = Object.keys(FIRMALAR), c = document.createElement('canvas');
+  c.width = H * TESIS_SEKILLER.length; c.height = H * firmalar.length;
+  const x = c.getContext('2d'), harita = {};
+  firmalar.forEach((f, i) => TESIS_SEKILLER.forEach((t, j) => {
+    x.save(); x.translate(j * H, i * H);
+    tesisYolu(x, t); x.lineJoin = 'round'; x.lineWidth = 7; x.strokeStyle = 'rgba(2,9,16,0.95)'; x.stroke();
+    x.fillStyle = rgb(FIRMALAR[f].renk); x.fill();
+    x.fillStyle = 'rgba(2,9,16,0.75)';
+    if (t === 'liman') { x.beginPath(); x.arc(32, 32, 9, 0, Math.PI * 2); x.fill(); }
+    if (t === 'havalimani') { x.fillRect(29, 14, 6, 36); x.fillRect(18, 28, 28, 6); }
+    x.restore();
+    harita[`${f}:${t}`] = { x: j * H, y: i * H, width: H, height: H, anchorX: H / 2, anchorY: H / 2, mask: false };
+  }));
+  return { url: c.toDataURL(), harita, canvas: c, firmalar };
+}
+const SA = sevkAtlasi(), TA = tesisAtlasi();
+function kirp(atlas, satir, sutun) {
+  const k = document.createElement('canvas'); k.width = k.height = H;
+  k.getContext('2d').drawImage(atlas.canvas, sutun * H, satir * H, H, H, 0, 0, H, H);
+  return k.toDataURL();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// DEMO VERİSİ — ajan url'leri boşken onların yerine geçer. Tümü TEMSİLİDİR.
+// Deniz rotaları Natural Earth kara poligonuna karşı denize düşecek şekilde
+// üretildi (Süveyş Kanalı veri setinde olmadığı için düz kanal hattıdır).
+// ════════════════════════════════════════════════════════════════════════════
+const DEMO_TESISLER = {
+  'vitra-karo': [
+    { id: 'vk-bozuyuk', name: 'VitrA Karo Bozüyük', kind: 'fabrika', lon: 30.07, lat: 39.93 },
+    { id: 'm-hamburg', name: 'Müşteri deposu — Almanya', kind: 'musteri', lon: 9.97, lat: 53.54, external: true },
+    { id: 't-ingiltere', name: 'Kil tedarikçisi — İngiltere', kind: 'tedarikci', lon: -4.14, lat: 50.37, external: true },
+    { id: 'm-izmir', name: 'Bayi — İzmir', kind: 'musteri', lon: 27.14, lat: 38.42, external: true },
+  ],
+  yapi: [
+    { id: 'yu-bozuyuk', name: 'Yapı Ürünleri Bozüyük', kind: 'fabrika', lon: 29.98, lat: 39.86 },
+    { id: 'm-abd', name: 'Distribütör — ABD', kind: 'musteri', lon: -74.0, lat: 40.67, external: true },
+    { id: 'm-korfez', name: 'Distribütör — BAE', kind: 'musteri', lon: 55.03, lat: 25.0, external: true },
+    { id: 'm-ankara', name: 'Bayi — Ankara', kind: 'musteri', lon: 32.85, lat: 39.93, external: true },
+  ],
+  ilac: [
+    { id: 'il-luleburgaz', name: 'İlaç üretim tesisi — Lüleburgaz', kind: 'fabrika', lon: 27.36, lat: 41.40 },
+    { id: 'il-depo', name: 'İlaç dağıtım deposu — İstanbul', kind: 'depo', lon: 28.67, lat: 41.04 },
+    { id: 't-cin', name: 'Etken madde tedarikçisi — Çin', kind: 'tedarikci', lon: 121.5, lat: 31.23, external: true },
+    { id: 't-hindistan', name: 'Etken madde tedarikçisi — Hindistan', kind: 'tedarikci', lon: 72.87, lat: 19.09, external: true },
+  ],
+  esan: [
+    { id: 'es-cine', name: 'ESAN Çine feldspat sahası', kind: 'maden', lon: 28.06, lat: 37.61 },
+    { id: 'es-balikesir', name: 'ESAN Balıkesir kaolen sahası', kind: 'maden', lon: 27.88, lat: 39.65 },
+    { id: 'es-gulluk', name: 'ESAN Güllük yükleme', kind: 'liman', lon: 27.59, lat: 37.24 },
+    { id: 'm-castellon', name: 'Seramik müşterisi — İspanya', kind: 'musteri', lon: -0.03, lat: 39.97, external: true },
+  ],
+  enerji: [
+    { id: 'en-santral', name: 'Enerji santrali', kind: 'santral', lon: 30.25, lat: 40.02 },
+    { id: 'en-ereglisi', name: 'LNG teslim noktası — Marmara Ereğlisi', kind: 'liman', lon: 27.96, lat: 40.97 },
+    { id: 't-lng', name: 'LNG tedarikçisi — Kuzey Afrika', kind: 'tedarikci', lon: 6.9, lat: 36.88, external: true },
+  ],
+};
+const ROTALAR = {
+  // kara
+  cine_bozuyuk: [[28.06,37.61],[28.6,37.75],[29.09,37.78],[29.8,38.3],[30.54,38.76],[29.98,39.42],[30.07,39.93]],
+  balikesir_bozuyuk: [[27.88,39.65],[28.16,39.91],[28.6,40.08],[29.06,40.19],[29.51,40.08],[30.07,39.93]],
+  cine_gulluk: [[28.06,37.61],[27.85,37.38],[27.59,37.24]],
+  bozuyuk_gemlik: [[30.07,39.93],[29.51,40.08],[29.06,40.19],[29.12,40.43]],
+  bozuyuk_ankara: [[29.98,39.86],[30.52,39.78],[31.2,39.6],[32.15,39.58],[32.85,39.93]],
+  bozuyuk_izmir: [[30.07,39.93],[29.98,39.42],[29.4,38.68],[28.3,38.6],[27.43,38.61],[27.14,38.42]],
+  luleburgaz_depo: [[27.36,41.4],[27.8,41.16],[28.25,41.07],[28.67,41.04]],
+  // hava
+  mumbai_ist: buyukDaire([72.87, 19.09], [28.75, 41.26]),
+  // deniz
+  gemlik_hamburg: [[29.025,40.425],[27.275,40.575],[26.975,40.525],[26.95,40.52],[26.78,40.45],[26.69,40.4],[26.67,40.38],[26.64,40.36],[26.615,40.34],[26.59,40.32],[26.56,40.3],[26.54,40.28],[26.51,40.26],[26.49,40.24],[26.465,40.22],[26.44,40.2],[26.42,40.18],[26.405,40.16],[26.385,40.14],[26.365,40.12],[26.33,40.1],[26.29,40.08],[26.22,40.06],[26.15,40.04],[26.175,40.025],[24.475,37.875],[23.275,36.375],[15.325,36.575],[9.625,37.475],[-4.325,36.575],[-5.775,35.925],[-9.125,36.975],[-9.575,38.975],[-9.375,42.975],[-4.075,49.425],[1.025,50.825],[5.375,54.025],[8.425,54.025],[8.4,54]],
+  gulluk_castellon: [[27.525,37.175],[26.475,37.125],[25.425,36.225],[20.675,36.575],[14.975,36.575],[0.025,39.975],[0.05,39.95]],
+  sanghay_ambarli: [[123.2,30.5],[123.5,27.5],[122.8,24.5],[121.5,21.3],[117,17],[112,12],[108.5,6.5],[105.8,3.2],[104.6,1.6],[104.2,1.2],[103.7,1.15],[103.2,1.5],[101.5,2.6],[100,3.8],[98.5,5.2],[97.5,5.9],[95.5,6.3],[88,5.8],[80.6,5.2],[75,7.5],[65,12],[55,13.6],[52,13.2],[48,12.5],[45,12],[43.4,12.6],[42.5,14],[40.5,17],[38.5,20.5],[36.5,23.5],[34.8,26.5],[33.8,27.6],[33,28.8],[32.6,29.7],[32.57,29.92],[32.33,31.25],[32.32,31.4],[32.325,31.425],[25.875,37.575],[25.725,38.975],[26.175,40.025],[26.15,40.04],[26.22,40.06],[26.29,40.08],[26.33,40.1],[26.365,40.12],[26.385,40.14],[26.405,40.16],[26.42,40.18],[26.44,40.2],[26.465,40.22],[26.49,40.24],[26.51,40.26],[26.54,40.28],[26.56,40.3],[26.59,40.32],[26.615,40.34],[26.64,40.36],[26.67,40.38],[26.69,40.4],[26.78,40.45],[26.95,40.52],[26.975,40.525],[28.675,40.975],[28.68,40.95]],
+  plymouth_gemlik: [[-4.15,50.3],[-4.175,50.275],[-9.625,43.475],[-9.625,38.725],[-9.125,37.025],[-5.825,35.925],[8.125,37.475],[13.625,37.075],[15.075,36.575],[22.375,36.325],[23.125,36.025],[24.325,37.875],[24.625,37.975],[26.175,40.025],[26.15,40.04],[26.22,40.06],[26.29,40.08],[26.33,40.1],[26.365,40.12],[26.385,40.14],[26.405,40.16],[26.42,40.18],[26.44,40.2],[26.465,40.22],[26.49,40.24],[26.51,40.26],[26.54,40.28],[26.56,40.3],[26.59,40.32],[26.615,40.34],[26.64,40.36],[26.67,40.38],[26.69,40.4],[26.78,40.45],[26.95,40.52],[26.975,40.525],[27.275,40.575],[29.025,40.425]],
+  gemlik_newyork: [[29.025,40.425],[27.275,40.575],[26.975,40.525],[26.95,40.52],[26.78,40.45],[26.69,40.4],[26.67,40.38],[26.64,40.36],[26.615,40.34],[26.59,40.32],[26.56,40.3],[26.54,40.28],[26.51,40.26],[26.49,40.24],[26.465,40.22],[26.44,40.2],[26.42,40.18],[26.405,40.16],[26.385,40.14],[26.365,40.12],[26.33,40.1],[26.29,40.08],[26.22,40.06],[26.15,40.04],[26.175,40.025],[24.475,37.875],[23.275,36.375],[15.325,36.575],[9.625,37.475],[-4.325,36.575],[-5.775,35.925],[-25.775,40.425],[-45.775,40.425],[-65.775,40.425],[-73.925,40.475],[-73.9,40.45]],
+  gemlik_jebelali: [[29.025,40.425],[27.275,40.575],[26.975,40.525],[26.95,40.52],[26.78,40.45],[26.69,40.4],[26.67,40.38],[26.64,40.36],[26.615,40.34],[26.59,40.32],[26.56,40.3],[26.54,40.28],[26.51,40.26],[26.49,40.24],[26.465,40.22],[26.44,40.2],[26.42,40.18],[26.405,40.16],[26.385,40.14],[26.365,40.12],[26.33,40.1],[26.29,40.08],[26.22,40.06],[26.15,40.04],[26.175,40.025],[25.725,38.975],[25.875,37.575],[32.325,31.425],[32.32,31.4],[32.33,31.25],[32.57,29.92],[32.6,29.7],[32.575,29.725],[33.225,28.475],[42.875,14.525],[43.325,12.825],[43.625,12.575],[45.075,12.675],[49.075,14.175],[55.225,16.975],[57.675,18.825],[59.075,20.625],[59.975,22.525],[56.475,26.475],[55.025,25.275],[54.925,25.025],[54.95,25.05]],
+  cezayir_ereglisi: [[6.95,37],[6.975,37.025],[8.375,37.475],[13.825,36.975],[15.225,36.575],[22.425,36.325],[23.175,36.075],[24.325,37.875],[24.625,37.975],[26.175,40.025],[26.15,40.04],[26.22,40.06],[26.29,40.08],[26.33,40.1],[26.365,40.12],[26.385,40.14],[26.405,40.16],[26.42,40.18],[26.44,40.2],[26.465,40.22],[26.49,40.24],[26.51,40.26],[26.54,40.28],[26.56,40.3],[26.59,40.32],[26.615,40.34],[26.64,40.36],[26.67,40.38],[26.69,40.4],[26.78,40.45],[26.95,40.52],[26.975,40.525],[27.975,40.975],[27.97,40.95]],
+};
+// [ajan, no, yön, malzeme, miktar, birim, mod, çıkış, varış, rota, plan hızı km/sa, başlangıç ilerlemesi, gecikme saat (null = ETA yok), neden]
+const DEMO_SEVKIYATLAR = [
+  ['esan', 'ES-2611', 'transfer', 'Sodyum feldspat', 28, 'ton', 'kara', 'es-cine', 'vk-bozuyuk', 'cine_bozuyuk', 55, 0.35, 0, null],
+  ['esan', 'ES-2612', 'transfer', 'Kaolen', 30, 'ton', 'kara', 'es-balikesir', 'vk-bozuyuk', 'balikesir_bozuyuk', 55, 0.6, null, null],
+  ['esan', 'ES-2613', 'transfer', 'Feldspat (ihracat yüklemesi)', 32, 'ton', 'kara', 'es-cine', 'es-gulluk', 'cine_gulluk', 50, 0.2, 0.5, null],
+  ['esan', 'ES-2588', 'satis', 'Sodyum feldspat', 4500, 'ton', 'deniz', 'es-gulluk', 'm-castellon', 'gulluk_castellon', 22, 0.45, 30, 'Liman bekleme (demo)'],
+  ['vitra-karo', 'VK-1041', 'satis', 'Porselen karo', 22, 'konteyner', 'deniz', 'gemlik', 'm-hamburg', 'gemlik_hamburg', 26, 0.4, 52, 'Aktarma gecikmesi (demo)'],
+  ['vitra-karo', 'VK-1042', 'transfer', 'Porselen karo', 1, 'tır', 'kara', 'vk-bozuyuk', 'gemlik', 'bozuyuk_gemlik', 60, 0.5, 0, null],
+  ['vitra-karo', 'VK-0977', 'alis', 'Ball clay (kil)', 3200, 'ton', 'deniz', 't-ingiltere', 'gemlik', 'plymouth_gemlik', 24, 0.55, 8, 'Hava koşulları (demo)'],
+  ['vitra-karo', 'VK-1050', 'satis', 'Duvar karosu', 1, 'tır', 'kara', 'vk-bozuyuk', 'm-izmir', 'bozuyuk_izmir', 60, 0.4, 2, null],
+  ['yapi', 'YU-3310', 'satis', 'Vitrifiye ürünler', 14, 'konteyner', 'deniz', 'gemlik', 'm-abd', 'gemlik_newyork', 28, 0.3, 0, null],
+  ['yapi', 'YU-3311', 'satis', 'Vitrifiye + armatür', 9, 'konteyner', 'deniz', 'gemlik', 'm-korfez', 'gemlik_jebelali', 27, 0.65, 14, 'Kanal geçiş sırası (demo)'],
+  ['yapi', 'YU-3320', 'satis', 'Armatür', 1, 'tır', 'kara', 'yu-bozuyuk', 'm-ankara', 'bozuyuk_ankara', 65, 0.5, 0, null],
+  ['ilac', 'IL-7001', 'alis', 'Etken madde (API)', 1.2, 'ton', 'hava', 't-hindistan', 'ist-havalimani', 'mumbai_ist', 780, 0.5, 3, 'Aktarma (demo)'],
+  ['ilac', 'IL-6990', 'alis', 'Etken madde (API)', 6, 'konteyner', 'deniz', 't-cin', 'ambarli', 'sanghay_ambarli', 30, 0.7, 96, 'Rota değişikliği (demo)'],
+  ['ilac', 'IL-7010', 'transfer', 'Bitmiş ürün', 1, 'tır', 'kara', 'il-luleburgaz', 'il-depo', 'luleburgaz_depo', 60, 0.3, 0, null],
+  ['enerji', 'EN-0412', 'alis', 'LNG', 140000, 'm³', 'deniz', 't-lng', 'en-ereglisi', 'cezayir_ereglisi', 28, 0.5, 6, null],
+];
+const DEMO_BAYAT_KONUM = { 'VK-1050': 3 * SAAT };          // bu tırın konumu 3 saattir güncellenmiyor
+const DEMO_YANITSIZ_AJAN = { id: 'enerji', sonBasariOnce: 12 * 60 * 1000 };   // demo senaryosu: ajan düşmüş
+
+function rotaHazirla(p) {
+  const kum = [0];
+  for (let i = 1; i < p.length; i++) kum.push(kum[i - 1] + mesafeKm(p[i - 1], p[i]));
+  return { p, kum, L: kum[kum.length - 1] };
+}
+const HAZIR = Object.fromEntries(Object.entries(ROTALAR).map(([k, v]) => [k, rotaHazirla(v)]));
+function rotaNoktasi(r, f) {
+  const s = Math.max(0, Math.min(1, f)) * r.L;
+  let i = 1; while (i < r.kum.length - 1 && r.kum[i] < s) i++;
+  const a = r.p[i - 1], b = r.p[i], seg = r.kum[i] - r.kum[i - 1] || 1, t = (s - r.kum[i - 1]) / seg;
+  return { pos: [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], brg: kerteriz(a, b) };
+}
+
+// Belirli bir veri zamanında demo ajanının vereceği yanıt
+function demoYanit(ajanId, T) {
+  const shipments = [];
+  for (const [aj, no, dir, mat, qty, unit, mode, from, to, rota, kmh, f0, gecH, neden] of DEMO_SEVKIYATLAR) {
+    if (aj !== ajanId) continue;
+    const r = HAZIR[rota], planMs = (r.L / kmh) * SAAT, gercekMs = planMs + (gecH || 0) * SAAT;
+    const bekleme = Math.max(0.5 * SAAT, 0.08 * planMs), dongu = gercekMs + bekleme;
+    const konumT = T - (DEMO_BAYAT_KONUM[no] || 0);              // bayat senaryoda eski konum
+    const baslangic = T0 - f0 * gercekMs;
+    const n = Math.floor((konumT - baslangic) / dongu), kalkis = baslangic + n * dongu, faz = konumT - kalkis;
+    const teslim = faz > gercekMs;
+    const { pos, brg } = rotaNoktasi(r, teslim ? 1 : faz / gercekMs);
+    shipments.push({
+      id: `${no}-${String(n + 2).padStart(2, '0')}`, direction: dir, material: mat, quantity: qty, unit, mode, from, to,
+      lon: pos[0], lat: pos[1], heading: teslim ? null : Math.round(brg), status: teslim ? 'teslim' : 'yolda',
+      departed_at: kalkis, eta_planned: kalkis + planMs, eta: gecH == null ? null : kalkis + gercekMs,
+      delay_reason: neden, route: r.p, ts: konumT,
+    });
+  }
+  return { generated_at: T, facilities: DEMO_TESISLER[ajanId] || [], shipments };
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// DURUM — ajan yanıtlarını al, normalle
+// ════════════════════════════════════════════════════════════════════════════
+const ajanDurum = new Map(AJANLAR.map((a) => [a.id, {
+  ajan: a, durum: DEMO ? 'demo' : a.url ? 'bekleniyor' : 'kapali',
+  sonBasari: null, sonHata: null, tesisler: [], sevkiyatlar: [], gecersiz: 0, tanimsizNokta: 0,
+}]));
+const izler = new Map();   // sevkiyat anahtarı → [{p, t}]
+const durum = { secili: null, takip: false, gizliFirma: new Set(), gizliYon: new Set(), sadeceGecikme: false, karaHata: null };
+
+function tesisNormalle(r, ajan) {
+  if (!r || r.id == null) return null;
+  const lon = sayi(r.lon), lat = sayi(r.lat);
+  if (lon == null || lat == null || Math.abs(lon) > 180 || Math.abs(lat) > 90) return null;
+  const tur = TESIS_TURLERI[r.kind] ? r.kind : 'depo';
+  return { id: String(r.id), firma: r.external ? 'dis' : ajan.firma, tur, ad: r.name ? String(r.name) : String(r.id), p: [lon, lat] };
+}
+function sevkNormalle(r, ajan) {
+  if (!r || r.id == null || String(r.id).trim() === '') return null;
+  const lon = sayi(r.lon), lat = sayi(r.lat);
+  if (lon == null || lat == null || Math.abs(lon) > 180 || Math.abs(lat) > 90) return null;
+  const nokta = (v) => (typeof v === 'string' ? { ref: v } : v && sayi(v.lon) != null && sayi(v.lat) != null
+    ? { ad: v.name ? String(v.name) : '—', p: [sayi(v.lon), sayi(v.lat)] } : null);
+  let hdg = sayi(r.heading); if (hdg != null && (hdg < 0 || hdg >= 360)) hdg = null;
+  const rota = Array.isArray(r.route) ? r.route.filter((q) => Array.isArray(q) && sayi(q[0]) != null && sayi(q[1]) != null) : null;
+  return {
+    anahtar: `${ajan.id}:${String(r.id).trim()}`, id: String(r.id).trim(), ajanId: ajan.id, firma: ajan.firma,   // firma = ajan
+    yon: YONLER[r.direction] ? r.direction : null, malzeme: r.material ? String(r.material) : null,
+    miktar: sayi(r.quantity), birim: r.unit ? String(r.unit) : '', mod: MODLAR[r.mode] ? r.mode : null,
+    cikis: nokta(r.from), varis: nokta(r.to), p: [lon, lat], hdg,
+    durum: DURUMLAR[r.status] ? r.status : null,
+    kalkis: zaman(r.departed_at), etaPlan: zaman(r.eta_planned), eta: zaman(r.eta),
+    neden: r.delay_reason ? String(r.delay_reason) : null, rota: rota && rota.length > 1 ? rota : null, ts: zaman(r.ts),
+  };
+}
+
+function yanitAl(ajanId, j) {
+  const d = ajanDurum.get(ajanId), a = d.ajan;
+  if (!j || typeof j !== 'object' || !Array.isArray(j.shipments)) throw new Error('yanıtta "shipments" dizisi yok');
+  const tesisler = (Array.isArray(j.facilities) ? j.facilities : []).map((r) => tesisNormalle(r, a)).filter(Boolean);
+  let gecersiz = 0; const sevk = [];
+  for (const r of j.shipments) { const s = sevkNormalle(r, a); if (s) sevk.push(s); else gecersiz++; }
+  // izler: aynı sevkiyat sürüyorsa uzat, listeden çıkanı (kapanan) sil
+  const yeni = new Set(sevk.map((s) => s.anahtar));
+  for (const s of d.sevkiyatlar) if (!yeni.has(s.anahtar)) izler.delete(s.anahtar);
+  for (const s of sevk) {
+    if (s.ts == null) continue;
+    let iz = izler.get(s.anahtar); if (!iz) { iz = []; izler.set(s.anahtar, iz); }
+    const z = iz[iz.length - 1];
+    if (!z || s.ts - z.t >= AYAR.izAdimSn * 1000) iz.push({ p: s.p, t: s.ts });
+    const sinir = simdi() - AYAR.izSn * 1000; let i = 0; while (i < iz.length && iz[i].t < sinir) i++; if (i) iz.splice(0, i);
+  }
+  Object.assign(d, { tesisler, sevkiyatlar: sevk, gecersiz });
+}
+
+// ── tesis dizini (sabit + ajanlardan) ────────────────────────────────────
+function tesisDizini() {
+  const m = new Map();
+  for (const t of SABIT_TESISLER) m.set(t.id, t);
+  for (const d of ajanDurum.values()) for (const t of d.tesisler) if (!m.has(t.id) || m.get(t.id).firma === 'dis') m.set(t.id, t);
+  return m;
+}
+function noktaCoz(n, dizin) {
+  if (!n) return null;
+  if (n.ref) { const t = dizin.get(n.ref); return t ? { ad: t.ad, p: t.p } : null; }
+  return n;
+}
+
+// Bir sevkiyatın bu karedeki görünümü: gecikme sınıfı, şekil, bayatlık
+function gorunum(s, T, dizin) {
+  const yas = s.ts == null ? null : (T - s.ts) / 1000;
+  const bayat = yas == null || yas > AYAR.bayatSn;
+  let gecMs = null, altSinir = false, kova;
+  if (s.durum === 'teslim') kova = 'teslim';
+  else {
+    if (s.eta != null && s.etaPlan != null) gecMs = s.eta - s.etaPlan;
+    if (s.etaPlan != null && T > s.etaPlan && (gecMs == null || s.etaPlan + gecMs < T)) { gecMs = T - s.etaPlan; altSinir = true; }  // plan geçti, hâlâ yolda
+    const sa = gecMs == null ? null : gecMs / SAAT;
+    kova = sa == null ? 'bilinmiyor' : sa <= AYAR.toleransSaat ? 'zamaninda' : sa <= AYAR.kritikSaat ? 'gecikmeli' : 'kritik';
+  }
+  let yon = s.hdg;
+  if (yon == null) { const iz = izler.get(s.anahtar); if (iz && iz.length >= 2) { const a = iz[iz.length - 2].p, b = iz[iz.length - 1].p; if (a[0] !== b[0] || a[1] !== b[1]) yon = kerteriz(a, b); } }
+  const sekil = s.durum === 'teslim' || yon == null || !s.mod ? 'yonsuz' : s.mod;
+  return { s, anahtar: s.anahtar, pos: s.p, yon, sekil, kova, gecMs, altSinir, yas, bayat,
+    cikis: noktaCoz(s.cikis, dizin), varis: noktaCoz(s.varis, dizin) };
+}
+function gecikmeMetni(v) {
+  if (v.kova === 'teslim') return 'teslim edildi';
+  if (v.gecMs == null) return 'bilinmiyor';
+  if (v.gecMs / SAAT <= AYAR.toleransSaat) return v.gecMs < -AYAR.toleransSaat * SAAT ? `${sureMetni(-v.gecMs)} erken` : 'zamanında';
+  return `${v.altSinir ? 'en az ' : ''}+${sureMetni(v.gecMs)}`;
+}
+
+// ── veri akışı ─────────────────────────────────────────────────────────────
+async function ajanYokla(a) {
+  const d = ajanDurum.get(a.id), ctl = new AbortController(), sure = setTimeout(() => ctl.abort(), AYAR.ajanZamanAsimiMs);
+  try {
+    const r = await fetch(a.url, { cache: 'no-store', signal: ctl.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    yanitAl(a.id, await r.json());
+    d.durum = 'tamam'; d.sonBasari = simdi(); d.sonHata = null;
+  } catch (e) {
+    d.durum = 'hata'; d.sonHata = e.name === 'AbortError' ? 'zaman aşımı' : e.message || String(e);
+    console.error(`[tedarik] ${a.ad}:`, e);
+  } finally {
+    clearTimeout(sure);
+    setTimeout(() => ajanYokla(a), AYAR.yoklamaMs);
+  }
+}
+function demoBaslat() {
+  const T = simdi(), adim = AYAR.izAdimSn * 1000;
+  for (const a of AJANLAR) {
+    const d = ajanDurum.get(a.id);
+    if (a.id === DEMO_YANITSIZ_AJAN.id) {           // son başarılı yanıt 12 dk önceydi, sonra düştü
+      const t = T - DEMO_YANITSIZ_AJAN.sonBasariOnce;
+      for (let u = t - AYAR.izSn * 1000; u < t; u += adim) yanitAl(a.id, demoYanit(a.id, u));
+      yanitAl(a.id, demoYanit(a.id, t));
+      Object.assign(d, { durum: 'hata', sonHata: 'zaman aşımı (demo senaryosu)', sonBasari: t });
+      continue;
+    }
+    for (let u = T - AYAR.izSn * 1000; u < T; u += adim) yanitAl(a.id, demoYanit(a.id, u));
+    yanitAl(a.id, demoYanit(a.id, T)); d.sonBasari = T;
+  }
+  setInterval(() => {
+    const T2 = simdi();
+    for (const a of AJANLAR) {
+      if (a.id === DEMO_YANITSIZ_AJAN.id) continue;
+      yanitAl(a.id, demoYanit(a.id, T2)); ajanDurum.get(a.id).sonBasari = T2;
+    }
+  }, 100);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// HARİTA
+// ════════════════════════════════════════════════════════════════════════════
+function enlemBoylamAgi(adim) {
+  const ara = (a, b) => { const o = []; for (let v = a; v <= b + 1e-9; v += 2) o.push(v); return o; };
+  const f = [];
+  for (let lon = -180; lon <= 180; lon += adim) f.push({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: ara(-80, 80).map((lat) => [lon, lat]) } });
+  for (let lat = -80; lat <= 80; lat += adim) f.push({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: ara(-180, 180).map((lon) => [lon, lat]) } });
+  return { type: 'FeatureCollection', features: f };
+}
+// 180° boylamını kesen halkalar (Doğu Rusya, Fiji) açılır; açılmazsa -180→180 sıçraması
+// dünya boyunca yatay çizgi çizer. Kutbu saran tek sıçramalı halka (Antarktika) olduğu gibi kalır.
+function antimeridyenAc(geo) {
+  const ac = (ring) => {
+    let atlama = 0;
+    for (let i = 1; i < ring.length; i++) if (Math.abs(ring[i][0] - ring[i - 1][0]) > 180) atlama++;
+    if (!atlama || atlama % 2) return ring;
+    const o = [ring[0]];
+    for (let i = 1; i < ring.length; i++) {
+      let x = ring[i][0]; const px = o[i - 1][0];
+      while (x - px > 180) x -= 360;
+      while (x - px < -180) x += 360;
+      o.push([x, ring[i][1]]);
+    }
+    let kay = 0, enIyi = -1;          // halkanın çoğu [-180, 180] içinde kalsın
+    for (const k of [-360, 0, 360]) { const n = o.filter(([x]) => x + k >= -180 && x + k <= 180).length; if (n > enIyi) { enIyi = n; kay = k; } }
+    return kay ? o.map(([x, y]) => [x + kay, y]) : o;
+  };
+  const geom = (g) => (g.type === 'Polygon' ? { ...g, coordinates: g.coordinates.map(ac) }
+    : g.type === 'MultiPolygon' ? { ...g, coordinates: g.coordinates.map((p) => p.map(ac)) } : g);
+  if (geo.type === 'FeatureCollection') return { ...geo, features: geo.features.map((f) => ({ ...f, geometry: geom(f.geometry) })) };
+  return { ...geo, geometry: geom(geo.geometry) };
+}
+const map = new maplibregl.Map({
+  container: 'harita',
+  style: {
+    version: 8,
+    sources: {
+      kara: { type: 'geojson', data: { type: 'FeatureCollection', features: [] },
+        attribution: '<a href="https://www.naturalearthdata.com" target="_blank" rel="noopener">Natural Earth</a>' },
+      ag: { type: 'geojson', data: enlemBoylamAgi(10) },
+    },
+    layers: [
+      { id: 'deniz', type: 'background', paint: { 'background-color': '#06111d' } },
+      { id: 'ag', type: 'line', source: 'ag', paint: { 'line-color': '#163650', 'line-width': 0.6, 'line-opacity': 0.5 } },
+      { id: 'kara', type: 'fill', source: 'kara', paint: { 'fill-color': '#0f1d2c' } },
+      { id: 'kiyi-isilti', type: 'line', source: 'kara', paint: { 'line-color': '#2b8cb8', 'line-width': 5, 'line-blur': 5, 'line-opacity': 0.15 } },
+      { id: 'kiyi', type: 'line', source: 'kara', paint: { 'line-color': '#3d84aa', 'line-width': 0.8, 'line-opacity': 0.8 } },
+    ],
+  },
+  ...AYAR.dunya, minZoom: 1, maxZoom: 16, maxPitch: 60, renderWorldCopies: false,
+  attributionControl: { compact: true },
+});
+map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'bottom-right');
+let deckHazir = false;   // deck WebGL'i hazır olmadan pickObject çağrılamaz
+const overlay = new deck.MapboxOverlay({ interleaved: false, layers: [], onLoad: () => { deckHazir = true; } });
+map.addControl(overlay);
+
+const karaSozu = fetch(AYAR.karaUrl)
+  .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+  .then((topo) => antimeridyenAc(topojson.feature(topo, topo.objects.land || topo.objects[Object.keys(topo.objects)[0]])))
+  .catch((e) => { durum.karaHata = e.message || String(e); console.error('[tedarik] kıyı verisi:', e); return null; });
+map.on('load', async () => { const geo = await karaSozu; if (geo) map.getSource('kara').setData(geo); });
+map.on('error', (e) => console.error('[tedarik] harita:', e && e.error ? e.error : e));
+
+// ── katmanlar ─────────────────────────────────────────────────────────────
+function goruluyor(v) {
+  if (durum.gizliFirma.has(v.s.firma)) return false;
+  if (v.s.yon && durum.gizliYon.has(v.s.yon)) return false;
+  if (durum.sadeceGecikme && !(v.kova === 'gecikmeli' || v.kova === 'kritik')) return false;
+  return true;
+}
+function katmanlar(T, liste, tesisler) {
+  const z = map.getZoom(), olcek = Math.max(0.75, Math.min(1.5, 0.75 + (z - 2) * 0.09));
+  const sec = durum.secili ? liste.find((v) => v.anahtar === durum.secili) : null;
+  const zt = Date.now() / 1000, aktif = liste.filter((v) => v.kova !== 'teslim');
+  const hatlar = aktif.filter((v) => v.cikis && v.varis);
+  const izVeri = [];
+  for (const v of liste) {
+    const iz = izler.get(v.anahtar); if (!iz || iz.length < 2) continue;
+    izVeri.push({ anahtar: v.anahtar, kova: v.kova, path: iz.map((n) => n.p), ts: iz.map((n) => gor(n.t)) });
+  }
+  const tesisAd = tesisler.filter((t) => z >= AYAR.tesisEtiketZoom || (t.tur === 'merkez' && z >= 4) || (t.firma === 'dis' && t.tur !== 'liman' && t.tur !== 'havalimani' && z >= 3 && z < 5.5));
+  const sevkAd = liste.filter((v) => z >= AYAR.etiketZoom || v.anahtar === durum.secili);
+  const kritik = aktif.filter((v) => v.kova === 'kritik' && !v.bayat);
+  return [
+    new deck.ArcLayer({   // çıkış → varış hattı (şirket rengi)
+      id: 'hat', data: hatlar, greatCircle: true,
+      getSourcePosition: (v) => v.cikis.p, getTargetPosition: (v) => v.varis.p,
+      getSourceColor: (v) => [...FIRMALAR[v.s.firma].renk, v.anahtar === durum.secili ? 230 : 60],
+      getTargetColor: (v) => [...FIRMALAR[v.s.firma].renk, v.anahtar === durum.secili ? 230 : 60],
+      getWidth: (v) => (v.anahtar === durum.secili ? 3 : 1.2), widthUnits: 'pixels', getHeight: 0.35,
+      updateTriggers: { getSourceColor: durum.secili, getTargetColor: durum.secili, getWidth: durum.secili },
+    }),
+    sec && sec.s.rota && new deck.PathLayer({
+      id: 'secili-rota', data: [sec.s.rota], getPath: (d) => d, getColor: [255, 255, 255, 110],
+      getWidth: 2, widthUnits: 'pixels', jointRounded: true,
+    }),
+    new deck.TripsLayer({
+      id: 'iz', data: izVeri, getPath: (d) => d.path, getTimestamps: (d) => d.ts,
+      getColor: (d) => (d.anahtar === durum.secili ? [255, 255, 255] : KOVALAR[d.kova].renk),
+      getWidth: (d) => (d.anahtar === durum.secili ? 3 : 1.8), widthUnits: 'pixels',
+      jointRounded: true, capRounded: true, fadeTrail: true, opacity: 0.8,
+      trailLength: AYAR.izSn, currentTime: gor(T),
+      updateTriggers: { getColor: durum.secili, getWidth: durum.secili },
+    }),
+    new deck.IconLayer({
+      id: 'tesis', data: tesisler, pickable: true, iconAtlas: TA.url, iconMapping: TA.harita,
+      getIcon: (t) => `${t.firma}:${t.tur}`, getPosition: (t) => t.p, getSize: (t) => (t.tur === 'merkez' ? 26 : 20),
+      sizeUnits: 'pixels', sizeScale: olcek, alphaCutoff: 0.02,
+    }),
+    tesisAd.length && new deck.TextLayer({
+      id: 'tesis-ad', data: tesisAd, getPosition: (t) => t.p, getText: (t) => t.ad,
+      getSize: 11, getColor: [150, 172, 196, 235], getPixelOffset: [0, 16], characterSet: 'auto',
+      fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
+      fontSettings: { sdf: true }, outlineWidth: 3, outlineColor: [6, 17, 29, 255],
+    }),
+    kritik.length && new deck.ScatterplotLayer({   // kritik gecikme nabzı
+      id: 'kritik', data: kritik, getPosition: (v) => v.pos, radiusUnits: 'pixels', filled: false, stroked: true,
+      getRadius: (12 + 10 * ((zt % 1.4) / 1.4)) * olcek, lineWidthUnits: 'pixels', getLineWidth: 2,
+      getLineColor: [239, 68, 68, Math.round(220 * (1 - (zt % 1.4) / 1.4))],
+      updateTriggers: { getRadius: zt, getLineColor: zt },
+    }),
+    sec && new deck.ScatterplotLayer({
+      id: 'secim', data: [sec], getPosition: (v) => v.pos, radiusUnits: 'pixels', filled: false, stroked: true,
+      getRadius: (17 + 2 * Math.sin(zt * 4)) * olcek, lineWidthUnits: 'pixels', getLineWidth: 2, getLineColor: [255, 255, 255, 220],
+      updateTriggers: { getRadius: zt },
+    }),
+    new deck.IconLayer({
+      id: 'sevk', data: liste, pickable: true, billboard: false, iconAtlas: SA.url, iconMapping: SA.harita,
+      getIcon: (v) => `${v.kova}:${v.sekil}`, getPosition: (v) => v.pos,
+      getAngle: (v) => (v.sekil === 'yonsuz' ? 0 : -v.yon),        // deck: saat yönü tersine derece
+      getSize: (v) => (v.anahtar === durum.secili ? 32 : v.sekil === 'kara' || v.sekil === 'demiryolu' ? 22 : 26),
+      sizeUnits: 'pixels', sizeScale: olcek, alphaCutoff: 0.02,
+      getColor: (v) => [255, 255, 255, v.bayat ? 85 : 255],
+    }),
+    sevkAd.length && new deck.TextLayer({
+      id: 'sevk-ad', data: sevkAd, getPosition: (v) => v.pos,
+      getText: (v) => `${v.s.id}${v.kova === 'gecikmeli' || v.kova === 'kritik' ? ' · ' + gecikmeMetni(v) : ''}`,
+      getSize: 11.5, getColor: (v) => [...(v.kova === 'zamaninda' ? [220, 232, 245] : KOVALAR[v.kova].renk), v.bayat ? 120 : 255],
+      getPixelOffset: [0, -19], characterSet: 'auto', fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
+      fontSettings: { sdf: true }, outlineWidth: 3, outlineColor: [6, 17, 29, 255],
+    }),
+  ].filter(Boolean);
+}
+
+// ── kare döngüsü ─────────────────────────────────────────────────────────
+let sonListe = [], sonTesisler = [];
+function gorunumler(T) {
+  const dizin = tesisDizini(), liste = [];
+  for (const d of ajanDurum.values()) for (const s of d.sevkiyatlar) liste.push(gorunum(s, T, dizin));
+  return { liste, dizin };
+}
+function kare() {
+  const T = simdi(), { liste, dizin } = gorunumler(T);
+  const gorunen = liste.filter(goruluyor);
+  const tesisler = [...dizin.values()].filter((t) => !durum.gizliFirma.has(t.firma));
+  sonListe = gorunen; sonTesisler = tesisler;
+  if (durum.takip && durum.secili) { const v = gorunen.find((x) => x.anahtar === durum.secili); if (v) map.jumpTo({ center: v.pos }); }
+  overlay.setProps({ layers: katmanlar(T, gorunen, tesisler) });
+  requestAnimationFrame(kare);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ARAYÜZ
+// ════════════════════════════════════════════════════════════════════════════
+const kovaRengi = (k) => rgb(KOVALAR[k].renk);
+function rozet() {
+  const r = $('rozet');
+  if (DEMO) { r.className = 'demo'; r.textContent = `DEMO VERİSİ · zaman ×${AYAR.demoHiz}`; }
+  else { r.className = 'canli'; r.textContent = 'CANLI'; }
+}
+function ajanMetni(d) {
+  if (d.durum === 'kapali') return ['yapılandırılmadı', KOVALAR.bilinmiyor.renk];
+  if (d.durum === 'bekleniyor') return ['ilk yanıt bekleniyor', KOVALAR.bilinmiyor.renk];
+  if (d.durum === 'hata') return [`yanıt yok${d.sonBasari ? ' · son yanıt ' + yasMetni((simdi() - d.sonBasari) / 1000) : ''}`, KOVALAR.kritik.renk];
+  return [d.durum === 'demo' ? 'demo' : `canlı · ${yasMetni((simdi() - d.sonBasari) / 1000)}`, KOVALAR.zamaninda.renk];
+}
+function ustBilgi() {
+  const T = simdi(), { liste } = gorunumler(T);
+  const aktif = liste.filter((v) => v.kova !== 'teslim');
+  const say = (k) => aktif.filter((v) => v.kova === k).length;
+  $('kpi').innerHTML = [
+    [aktif.length, 'aktif sevkiyat', ''], [say('zamaninda'), 'zamanında', 'renk-zamaninda'],
+    [say('gecikmeli'), 'gecikmeli', 'renk-gecikmeli'], [say('kritik'), 'kritik', 'renk-kritik'],
+    [say('bilinmiyor'), 'ETA bilinmiyor', 'renk-bilinmiyor'],
+  ].map(([n, ad, c]) => `<div><b class="${c}">${n}</b><span>${ad}</span></div>`).join('');
+
+  $('ajanlar').innerHTML = [...ajanDurum.values()].map((d) => {
+    const [m, c] = ajanMetni(d);
+    return `<span class="ajan" title="${esc(d.ajan.ad)}"><i style="background:${rgb(c)}"></i>${esc(FIRMALAR[d.ajan.firma].ad)} · ${esc(m)}</span>`;
+  }).join('');
+
+  const u = [];
+  for (const d of ajanDurum.values()) {
+    const ad = FIRMALAR[d.ajan.firma].ad;
+    if (d.durum === 'hata') {
+      u.push(['hata', `${ad} ajanı yanıt vermiyor (${d.sonHata}). ` + (d.sevkiyatlar.length
+        ? `Bu şirketin ${d.sevkiyatlar.length} sevkiyatı son başarılı yanıttaki haliyle, soluk gösteriliyor.`
+        : 'Bu şirketten henüz hiç veri alınamadı.')]);
+    }
+    if (d.gecersiz) u.push(['uyari', `${ad} ajanından ${d.gecersiz} kayıt geçersiz kimlik/konumla geldi, haritaya çizilmedi.`]);
+  }
+  const cozulemeyen = liste.filter((v) => v.kova !== 'teslim' && (!v.cikis || !v.varis)).length;
+  if (cozulemeyen) u.push(['uyari', `${cozulemeyen} sevkiyatın çıkış/varış noktası tesis listesinde yok; hattı çizilmedi.`]);
+  const bayat = aktif.filter((v) => v.bayat).length;
+  if (bayat) u.push(['uyari', `${bayat} sevkiyatın konumu ${sureMetni(AYAR.bayatSn * 1000)}'dan eski (soluk gösteriliyor).`]);
+  if (durum.karaHata) u.push(['uyari', `Kıyı çizgisi yüklenemedi (${durum.karaHata}); yalnız deniz zemini gösteriliyor.`]);
+  $('uyarilar').innerHTML = u.map(([s, m]) => `<div class="${s}">${esc(m)}</div>`).join('');
+
+  lejantSay(liste);
+  listeCiz(liste);
+}
+
+// ── lejant + süzgeçler ──────────────────────────────────────────────────
+function lejantYap() {
+  const firmalar = Object.entries(FIRMALAR).filter(([k]) => k !== 'holding');
+  const kovaSira = Object.keys(KOVALAR);
+  $('lejant').innerHTML =
+    `<div class="grup"><h3>Şirketler</h3>` + firmalar.map(([k, f]) =>
+      `<label><input type="checkbox" data-firma="${k}" checked><span class="nokta" style="background:${rgb(f.renk)}"></span>${esc(f.ad)}<span class="say" data-say="${k}"></span></label>`).join('') + `</div>`
+    + `<div class="grup"><h3>Yön</h3>` + Object.entries(YONLER).map(([k, ad]) =>
+      `<label><input type="checkbox" data-yon="${k}" checked>${esc(ad)}</label>`).join('')
+    + `<label><input type="checkbox" id="sadece-gecikme">Yalnız gecikenler</label></div>`
+    + `<div class="grup"><h3>Gecikme</h3><div class="yatay">` + kovaSira.map((k) =>
+      `<span><img src="${kirp(SA, kovaSira.indexOf(k), 0)}" alt="">${esc(KOVALAR[k].ad)}</span>`).join('') + `</div></div>`
+    + `<div class="grup"><h3>Taşıma</h3><div class="yatay">` + SEVK_SEKILLER.map((s, j) =>
+      `<span><img src="${kirp(SA, 0, j)}" alt="">${s === 'yonsuz' ? 'yön bilinmiyor' : esc(MODLAR[s])}</span>`).join('') + `<span>soluk = konum bayat</span></div></div>`;
+  $('lejant').addEventListener('change', (e) => {
+    const t = e.target;
+    if (t.dataset.firma) { if (t.checked) durum.gizliFirma.delete(t.dataset.firma); else durum.gizliFirma.add(t.dataset.firma); }
+    if (t.dataset.yon) { if (t.checked) durum.gizliYon.delete(t.dataset.yon); else durum.gizliYon.add(t.dataset.yon); }
+    if (t.id === 'sadece-gecikme') durum.sadeceGecikme = t.checked;
+    ustBilgi();
+  });
+}
+function lejantSay(liste) {
+  for (const k of Object.keys(FIRMALAR)) {
+    const el = document.querySelector(`[data-say="${k}"]`); if (!el) continue;
+    const n = liste.filter((v) => v.s.firma === k && v.kova !== 'teslim').length;
+    el.textContent = k === 'dis' ? '' : n;
+  }
+}
+
+// ── gecikme listesi ─────────────────────────────────────────────────────
+function listeCiz(liste) {
+  const agirlik = { kritik: 0, gecikmeli: 1, bilinmiyor: 2, zamaninda: 3, teslim: 4 };
+  const sirali = liste.filter(goruluyor).filter((v) => v.kova !== 'teslim')
+    .sort((a, b) => agirlik[a.kova] - agirlik[b.kova] || (b.gecMs || 0) - (a.gecMs || 0));
+  const geciken = sirali.filter((v) => v.kova === 'kritik' || v.kova === 'gecikmeli').length;
+  $('liste').innerHTML = `<h3>Sevkiyatlar <span>${geciken} geciken · ${sirali.length} gösterilen</span></h3>`
+    + (sirali.length ? sirali.map((v) => {
+      const s = v.s;
+      return `<div class="kalem${v.anahtar === durum.secili ? ' secili' : ''}" data-anahtar="${esc(v.anahtar)}">`
+        + `<i style="background:${kovaRengi(v.kova)}"></i>`
+        + `<div class="ust">${esc(s.id)} · ${esc(s.malzeme || '—')}</div>`
+        + `<div class="gec renk-${v.kova}">${esc(gecikmeMetni(v))}</div>`
+        + `<div class="aciklama">${esc(FIRMALAR[s.firma].ad)} · ${esc(s.yon ? YONLER[s.yon] : '—')} · `
+        + `${esc(v.cikis ? v.cikis.ad : '?')} → ${esc(v.varis ? v.varis.ad : '?')}${v.bayat ? ' · konum ' + esc(yasMetni(v.yas)) : ''}</div></div>`;
+    }).join('') : `<div class="bos">Süzgece uyan aktif sevkiyat yok.</div>`);
+}
+$('liste').addEventListener('click', (e) => {
+  const k = e.target.closest('.kalem'); if (!k) return;
+  secVeGit(k.dataset.anahtar);
+});
+
+// ── detay ──────────────────────────────────────────────────────────────
+function detayGuncelle() {
+  const p = $('detay'); if (!durum.secili) { p.hidden = true; return; }
+  const T = simdi(), { liste } = gorunumler(T), v = liste.find((x) => x.anahtar === durum.secili);
+  if (!v) { p.hidden = true; durum.secili = null; return; }
+  const s = v.s, d = ajanDurum.get(s.ajanId), [ajanM] = ajanMetni(d);
+  p.hidden = false;
+  $('d-baslik').textContent = s.malzeme || 'Malzeme bildirilmedi';
+  $('d-alt').textContent = `${s.id} · ${FIRMALAR[s.firma].ad}`;
+  const etaMetni = s.eta == null ? 'bilinmiyor (ajan göndermedi)'
+    : tarihMetni(s.eta) + (s.eta < T && s.durum !== 'teslim' ? ' · geçti, hâlâ yolda' : '');
+  const satir = [
+    ['Yön', s.yon ? YONLER[s.yon] : '—'],
+    ['Taşıma', s.mod ? MODLAR[s.mod] : '—'],
+    ['Miktar', s.miktar == null ? '—' : `${s.miktar.toLocaleString('tr-TR')} ${s.birim}`],
+    ['Güzergâh', `${v.cikis ? v.cikis.ad : 'tanımsız'} → ${v.varis ? v.varis.ad : 'tanımsız'}`],
+    ['Durum', s.durum ? DURUMLAR[s.durum] : '—'],
+    ['Kalkış', tarihMetni(s.kalkis)],
+    ['Planlanan varış', tarihMetni(s.etaPlan)],
+    ['Tahmini varış', etaMetni],
+    ['Gecikme', gecikmeMetni(v), `renk-${v.kova}`],
+    ['Gecikme nedeni', s.neden || '—'],
+    ['Son konum', yasMetni(v.yas) + (v.bayat ? ' (bayat)' : '')],
+    ['Kaynak', `${d.ajan.ad} · ${ajanM}`],
+  ];
+  $('d-liste').innerHTML = satir.map(([a, b, c]) => `<dt>${esc(a)}</dt><dd${c ? ` class="${c}"` : ''}>${esc(b)}</dd>`).join('');
+  const t = $('d-takip'); t.textContent = durum.takip ? 'Takibi bırak' : 'Takip et'; t.classList.toggle('acik', durum.takip);
+}
+function sec(anahtar) { durum.secili = anahtar; if (!anahtar) durum.takip = false; detayGuncelle(); ustBilgi(); }
+function secVeGit(anahtar) {
+  sec(anahtar);
+  const v = sonListe.find((x) => x.anahtar === anahtar);
+  if (v) map.flyTo({ center: v.pos, zoom: Math.max(map.getZoom(), v.s.mod === 'kara' ? 6.5 : 4.5), essential: true });
+}
+$('d-kapat').onclick = () => sec(null);
+$('d-takip').onclick = () => { durum.takip = !durum.takip; detayGuncelle(); };
+$('git-dunya').onclick = () => map.flyTo({ ...AYAR.dunya, essential: true });
+$('git-tr').onclick = () => map.flyTo({ ...AYAR.turkiye, essential: true });
+
+$('ara').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const q = e.target.value.trim().toLocaleLowerCase('tr'), sonuc = $('ara-sonuc');
+  if (!q) { sonuc.textContent = ''; return; }
+  const ic = (x) => (x || '').toLocaleLowerCase('tr').includes(q);
+  const { liste } = gorunumler(simdi());
+  const v = liste.find((x) => ic(x.s.id) || ic(x.s.malzeme));
+  if (v) {
+    durum.gizliFirma.delete(v.s.firma); durum.gizliYon.delete(v.s.yon); durum.sadeceGecikme = false;
+    document.querySelectorAll('#lejant input').forEach((i) => { i.checked = i.id !== 'sadece-gecikme'; });
+    sonuc.textContent = ''; secVeGit(v.anahtar); return;
+  }
+  const t = [...tesisDizini().values()].find((x) => ic(x.ad));
+  if (t) { sonuc.textContent = `Tesis: ${t.ad}`; map.flyTo({ center: t.p, zoom: Math.max(map.getZoom(), 6.5), essential: true }); return; }
+  sonuc.textContent = 'Eşleşen sevkiyat ya da tesis yok.';
+});
+
+// ── fare: ipucu + seçim ─────────────────────────────────────────────────
+const ipucu = $('ipucu');
+const sec_al = (p) => (deckHazir ? overlay.pickObject({ x: p.x, y: p.y, radius: 6, layerIds: ['sevk', 'tesis'] }) : null);
+map.on('mousemove', (e) => {
+  const info = sec_al(e.point);
+  if (!info || !info.object) { ipucu.style.display = 'none'; map.getCanvas().style.cursor = ''; return; }
+  map.getCanvas().style.cursor = 'pointer';
+  if (info.layer.id === 'tesis') {
+    const t = info.object;
+    ipucu.innerHTML = `<b>${esc(t.ad)}</b><br><span class="s">${esc(TESIS_TURLERI[t.tur])} · ${esc(FIRMALAR[t.firma].ad)}</span>`;
+  } else {
+    const v = info.object, s = v.s;
+    ipucu.innerHTML = `<b>${esc(s.id)}</b> <span class="s">${esc(s.malzeme || '')}</span><br>`
+      + `<span class="renk-${v.kova}">${esc(KOVALAR[v.kova].ad)} · ${esc(gecikmeMetni(v))}</span><br>`
+      + `<span class="s">${esc(v.cikis ? v.cikis.ad : '?')} → ${esc(v.varis ? v.varis.ad : '?')}</span>`;
+  }
+  ipucu.style.display = 'block';
+  const x = Math.min(e.point.x + 14, window.innerWidth - ipucu.offsetWidth - 8);
+  ipucu.style.left = `${x}px`; ipucu.style.top = `${e.point.y + 14}px`;
+});
+map.on('mouseout', () => { ipucu.style.display = 'none'; });
+map.on('click', (e) => {
+  const info = sec_al(e.point);
+  if (info && info.object && info.layer.id === 'sevk') sec(info.object.anahtar);
+  else if (!info || !info.object) sec(null);
+});
+map.on('dragstart', () => { if (durum.takip) { durum.takip = false; detayGuncelle(); } });
+
+// ── başlat ──────────────────────────────────────────────────────────────
+rozet(); lejantYap();
+if (DEMO) demoBaslat(); else for (const a of AJANLAR) if (a.url) ajanYokla(a);
+ustBilgi();
+setInterval(() => { ustBilgi(); detayGuncelle(); }, 1000);
+requestAnimationFrame(kare);
+</script>
+</body>
+</html>
